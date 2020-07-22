@@ -7,3 +7,7 @@ type goWorker struct {
 	task        chan func()
 	recycleTime time.Time
 }
+
+func (w *goWorker) run() {
+
+}
