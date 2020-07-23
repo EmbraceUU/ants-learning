@@ -18,4 +18,13 @@ type Options struct {
 	// PreAlloc indicates whether to make memory pre-allocation where initializing Pool.
 	// 是否在初始化时, 预加载内存
 	PreAlloc bool
+
+	// Max number of goroutine blocking on pool.Submit.
+	// 0 (default value) means no such limit.
+	MaxBlockingTasks int
+
+	// When Nonblocking is true, Pool.Submit will never be blocked.
+	// ErrPoolOverload will be returned when Pool.Submit cannot be done at once.
+	// When Nonblocking is true, MaxBlockingTasks is inoperative.
+	Nonblocking bool
 }
