@@ -2,6 +2,8 @@ package ants_learning
 
 import (
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type Pool struct {
@@ -32,6 +34,37 @@ type Pool struct {
 	options *Options
 }
 
+// periodicallyPurge clears expired workers periodically.
+func (p *Pool) periodicallyPurge() {
+	// 思路: 遍历空闲worker, 检查空闲worker的时间戳是否超时, 将超时的释放掉
+	// 根据LIFO的规则, 遍历worker一直到发现没有过期的那一个, 将前面的全部释放掉, 这样就不会发生复制了
+	heatbeat := time.NewTicker(p.options.ExpiryDuration)
+	defer heatbeat.Stop()
+
+	for range heatbeat.C {
+		// ticker的退出条件
+		if atomic.LoadInt32(&p.state) == CLOSED {
+			break
+		}
+
+		// 加锁了
+		p.lock.Lock()
+		expiredWorkers := p.workers.retrieveExpiry(p.options.ExpiryDuration)
+		p.lock.Unlock()
+
+		// task的释放必须在p.lock外面, 因为w.task有可能在blocking然后消费时间过多
+		for i := range expiredWorkers {
+			expiredWorkers[i].task <- nil
+		}
+
+		// 当所有worker都被清理后, 应该将所有被wait阻塞的invokers唤醒
+		if p.Running() == 0 {
+			p.cond.Broadcast()
+		}
+
+	}
+}
+
 // 新创建一个pool
 func NewPool(size int, options ...Option) (*Pool, error) {
 	opts := loadOptions(options...)
@@ -49,6 +82,8 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 			task: make(chan func(), workerChanCap),
 		}
 	}
+	// 开启一个协程, 专门清理workers
+	go p.periodicallyPurge()
 	return p, nil
 }
 
@@ -135,7 +170,7 @@ func (p *Pool) retrieveWorker() (w *goWorker) {
 		// 尝试获取worker
 		w = p.workers.detach()
 		if w == nil {
-			// todo 使用goto代替了for
+			// todo 使用goto和cond代替了for
 			goto Reentry
 		}
 		p.lock.Unlock()
@@ -144,6 +179,23 @@ func (p *Pool) retrieveWorker() (w *goWorker) {
 }
 
 // revertWorker puts a worker back into free pool, recycling the goroutines.
+// 将worker放回空闲队列, 复用协程
 func (p *Pool) revertWorker(worker *goWorker) bool {
-	return false
+	// 检查
+	if capacity := p.Cap(); capacity > p.Running() || atomic.LoadInt32(&p.state) == CLOSED {
+		return false
+	}
+	worker.recycleTime = time.Now()
+	p.lock.Lock()
+	// 把worker插入workers
+	err := p.workers.insert(worker)
+	if err != nil {
+		p.lock.Unlock()
+		return false
+	}
+
+	// 因为回收了一个worker, 所以释放一个信号, 允许一个被wait阻塞的invoker被唤醒
+	p.cond.Signal()
+	p.lock.Unlock()
+	return true
 }
